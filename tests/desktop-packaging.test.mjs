@@ -105,6 +105,8 @@ test('Windows NSIS 使用安装钩子修复独立 ICO 快捷方式图标', () =>
   assert.match(hooks, /创建者：zhenghq/)
   assert.match(hooks, /!macro NSIS_HOOK_POSTINSTALL/)
   assert.match(hooks, /CreateShortCut/)
+  assert.match(hooks, /\$\{If\} \$\{FileExists\}/)
+  assert.match(hooks, /仅修正已存在的快捷方式/)
   assert.match(hooks, /resources\\app-icon\.ico/)
   assert.match(hooks, /SHChangeNotify/)
 
