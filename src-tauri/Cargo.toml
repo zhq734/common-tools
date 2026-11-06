@@ -1,0 +1,17 @@
+[package]
+name = "common-tools-tauri"
+version = "1.0.0"
+description = "工具箱独立桌面应用"
+authors = ["zhenghq"]
+edition = "2021"
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[lib]
+name = "common_tools_lib"
+crate-type = ["lib", "cdylib", "staticlib"]

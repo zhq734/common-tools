@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "工具箱主窗口的默认权限",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://github.com/zhq734/common-tools" }
+      ]
+    }
+  ]
+}

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { Moon, Sun, Github } from 'lucide-vue-next'
+import { isTauri } from '@tauri-apps/api/core'
+import { openUrl } from '@tauri-apps/plugin-opener'
 import { useThemeStore } from '@/stores/theme'
 import { useRoute } from 'vue-router'
 
@@ -13,6 +15,19 @@ const mounted = ref(false)
 onMounted(() => {
   mounted.value = true
 })
+
+/**
+ * 打开项目源码地址；桌面端调用系统默认浏览器，网页端回退到新标签页。
+ * @returns void
+ * 创建者：zhenghq
+ */
+async function openRepo(): Promise<void> {
+  if (isTauri()) {
+    await openUrl(repoUrl)
+    return
+  }
+  window.open(repoUrl, '_blank', 'noopener,noreferrer')
+}
 </script>
 
 <template>
@@ -31,7 +46,7 @@ onMounted(() => {
           <Sun v-if="themeStore.mode === 'dark'" :size="16" />
           <Moon v-else :size="16" />
         </button>
-        <a class="header-btn" :href="repoUrl" target="_blank" rel="noopener noreferrer" title="查看源码">
+        <a class="header-btn" :href="repoUrl" target="_blank" rel="noopener noreferrer" title="查看源码" @click.prevent="openRepo">
           <Github :size="16" />
         </a>
       </div>

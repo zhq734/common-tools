@@ -1,0 +1,139 @@
+name: Build Desktop Installers
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            build_command: npm run desktop:build:mac
+            artifact_name: desktop-macos
+          - platform: ubuntu-22.04
+            build_command: npm run desktop:build:linux
+            artifact_name: desktop-linux
+          - platform: windows-latest
+            build_command: npm run desktop:build:windows
+            artifact_name: desktop-windows
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 安装 Linux 系统依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            xdg-utils \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: 运行前端测试
+        run: npm test
+
+      - name: 构建桌面安装包
+        run: ${{ matrix.build_command }}
+
+      - name: 收集 macOS 安装包
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist-desktop
+          test -d src-tauri/target/release/bundle/dmg
+          test -d src-tauri/target/release/bundle/macos
+          find src-tauri/target/release/bundle/dmg -name '*.dmg' -type f -exec cp {} dist-desktop/ \;
+          app_path=$(find src-tauri/target/release/bundle/macos -name '*.app' -maxdepth 1 -type d -print -quit)
+          test -n "$app_path"
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" dist-desktop/CommonTools.app.zip
+          test -s dist-desktop/CommonTools.app.zip
+
+      - name: 收集 Linux 安装包
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist-desktop
+          test -d src-tauri/target/release/bundle/appimage
+          test -d src-tauri/target/release/bundle/deb
+          find src-tauri/target/release/bundle/appimage -name '*.AppImage' -type f -exec cp {} dist-desktop/ \;
+          find src-tauri/target/release/bundle/deb -name '*.deb' -type f -exec cp {} dist-desktop/ \;
+          test -n "$(find dist-desktop -name '*.AppImage' -type f -print -quit)"
+          test -n "$(find dist-desktop -name '*.deb' -type f -print -quit)"
+          chmod +x dist-desktop/*.AppImage
+
+      - name: 收集 Windows 安装包
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist-desktop | Out-Null
+          $installers = @(Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter *.exe -File)
+          if ($installers.Count -eq 0) { throw '未找到 NSIS 安装包' }
+          $installers | Copy-Item -Destination dist-desktop
+
+      - name: Upload desktop artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist-desktop/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download desktop artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
