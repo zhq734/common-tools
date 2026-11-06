@@ -65,9 +65,11 @@ test('桌面应用具备 Tauri 配置与最小 Rust 入口', () => {
   assert.deepEqual(config.bundle.targets, ['app', 'dmg', 'appimage', 'deb', 'nsis'])
   assert.equal(config.bundle.macOS.minimumSystemVersion, '12.0')
   assert.equal(config.bundle.macOS.signingIdentity, '-')
+  assert.equal(config.bundle.macOS.hardenedRuntime, true, '签名公证需要 hardened runtime')
   assert.equal(config.bundle.linux.appimage.bundleMediaFramework, false)
   assert.equal(config.bundle.windows.nsis.installMode, 'currentUser')
   assert.deepEqual(config.bundle.windows.nsis.languages, ['SimpChinese', 'English'])
+  assert.equal(config.bundle.windows.nsis.installerHooks, './windows/hooks.nsh')
 
   const cargo = readRepoText('src-tauri/Cargo.toml')
   assert.match(cargo, /\[package\]\s+name = "common-tools-tauri"/)
@@ -91,15 +93,56 @@ test('桌面应用具备 Tauri 配置与最小 Rust 入口', () => {
   assert.deepEqual(openerPermission.allow, [{ url: 'https://github.com/zhq734/common-tools' }])
 })
 
-test('package.json 提供 Tauri 依赖与各平台桌面构建脚本', () => {
+test('应用版本统一从 package.json 读取，便于标签构建时同步版本号', () => {
+  const config = readRepoJson('src-tauri/tauri.conf.json')
+  assert.equal(config.version, '../package.json', 'Tauri 版本应指向 package.json')
+  const pkg = readRepoJson('package.json')
+  assert.equal(pkg.version, '1.0.0')
+})
+
+test('Windows NSIS 使用安装钩子修复独立 ICO 快捷方式图标', () => {
+  const hooks = readRepoText('src-tauri/windows/hooks.nsh')
+  assert.match(hooks, /创建者：zhenghq/)
+  assert.match(hooks, /!macro NSIS_HOOK_POSTINSTALL/)
+  assert.match(hooks, /CreateShortCut/)
+  assert.match(hooks, /resources\\app-icon\.ico/)
+  assert.match(hooks, /SHChangeNotify/)
+
+  const config = readRepoJson('src-tauri/tauri.conf.json')
+  assert.deepEqual(config.bundle.resources, { 'icons/icon.ico': 'resources/app-icon.ico' })
+})
+
+test('package.json 提供 Tauri 依赖与各平台双架构桌面构建脚本', () => {
   const pkg = readRepoJson('package.json')
   assert.equal(pkg.devDependencies['@tauri-apps/cli'], '^2.12.4')
   assert.equal(pkg.dependencies['@tauri-apps/plugin-opener'], '^2.7.2')
   assert.equal(pkg.scripts.tauri, 'tauri')
   assert.equal(pkg.scripts['desktop:dev'], 'tauri dev')
-  assert.equal(pkg.scripts['desktop:build:mac'], 'tauri build --bundles app,dmg')
+  assert.equal(
+    pkg.scripts['desktop:build:mac:arm64'],
+    'tauri build --target aarch64-apple-darwin --bundles app,dmg',
+  )
+  assert.equal(
+    pkg.scripts['desktop:build:mac:x64'],
+    'tauri build --target x86_64-apple-darwin --bundles app,dmg',
+  )
+  assert.equal(
+    pkg.scripts['desktop:build:mac:arm64:unsigned'],
+    'tauri build --target aarch64-apple-darwin --bundles app,dmg --config src-tauri/tauri.unsigned.conf.json',
+  )
+  assert.equal(
+    pkg.scripts['desktop:build:mac:x64:unsigned'],
+    'tauri build --target x86_64-apple-darwin --bundles app,dmg --config src-tauri/tauri.unsigned.conf.json',
+  )
+  assert.equal(
+    pkg.scripts['desktop:build:windows:x64'],
+    'tauri build --target x86_64-pc-windows-msvc --bundles nsis',
+  )
+  assert.equal(
+    pkg.scripts['desktop:build:windows:arm64'],
+    'tauri build --target aarch64-pc-windows-msvc --bundles nsis',
+  )
   assert.equal(pkg.scripts['desktop:build:linux'], 'tauri build --bundles appimage,deb')
-  assert.equal(pkg.scripts['desktop:build:windows'], 'tauri build --bundles nsis')
 
   const lock = readRepoJson('package-lock.json')
   assert.ok(lock.packages['node_modules/@tauri-apps/cli'])
@@ -115,14 +158,30 @@ test('顶部源码链接在桌面端通过 opener 插件打开，在网页端回
   assert.match(app, /创建者：zhenghq/)
 })
 
-test('GitHub Actions 在 macOS、Linux、Windows 上构建安装包并在标签发布时创建 Release', () => {
+test('未签名 macOS 使用独立覆盖配置关闭公证所需的 hardened runtime', () => {
+  const unsigned = readRepoJson('src-tauri/tauri.unsigned.conf.json')
+  assert.equal(unsigned.bundle.macOS.signingIdentity, '-')
+  assert.equal(unsigned.bundle.macOS.hardenedRuntime, false)
+  const workflow = readRepoText('.github/workflows/build-desktop.yml')
+  assert.match(workflow, /unsigned_command: desktop:build:mac:x64:unsigned/)
+  assert.match(workflow, /unsigned_command: desktop:build:mac:arm64:unsigned/)
+  assert.match(workflow, /matrix\.unsigned_command/)
+})
+
+test('GitHub Actions 按架构矩阵构建 macOS 与 Windows 桌面安装包', () => {
   const workflow = readRepoText('.github/workflows/build-desktop.yml')
   assert.match(workflow, /workflow_dispatch/)
   assert.match(workflow, /tags:\s*\n\s*- 'v\*'/)
   assert.match(workflow, /branches: \[main\]/)
-  for (const platform of ['macos-latest', 'ubuntu-22.04', 'windows-latest']) {
-    assert.ok(workflow.includes(platform), `应包含 ${platform}`)
+  assert.match(workflow, /npm version "\$VERSION" --no-git-tag-version --allow-same-version/)
+  for (const runner of ['macos-15-intel', 'macos-15', 'windows-2025', 'ubuntu-22.04']) {
+    assert.ok(workflow.includes(runner), `应包含 ${runner}`)
   }
+  assert.match(workflow, /aarch64-apple-darwin/)
+  assert.match(workflow, /x86_64-apple-darwin/)
+  assert.match(workflow, /x86_64-pc-windows-msvc/)
+  assert.match(workflow, /aarch64-pc-windows-msvc/)
+  assert.match(workflow, /rustup target add/)
   assert.match(workflow, /libwebkit2gtk-4\.1-dev/)
   assert.match(workflow, /libayatana-appindicator3-dev/)
   assert.match(workflow, /librsvg2-dev/)
@@ -130,16 +189,65 @@ test('GitHub Actions 在 macOS、Linux、Windows 上构建安装包并在标签�
   assert.match(workflow, /dtolnay\/rust-toolchain@stable/)
   assert.match(workflow, /Swatinem\/rust-cache@v2/)
   assert.match(workflow, /npm ci/)
-  assert.match(workflow, /desktop:build:mac/)
+  assert.match(workflow, /desktop:build:mac:arm64/)
+  assert.match(workflow, /desktop:build:mac:x64/)
+  assert.match(workflow, /desktop:build:windows:x64/)
+  assert.match(workflow, /desktop:build:windows:arm64/)
   assert.match(workflow, /desktop:build:linux/)
-  assert.match(workflow, /desktop:build:windows/)
   assert.match(workflow, /actions\/upload-artifact@v4/)
   assert.match(workflow, /actions\/download-artifact@v4/)
-  assert.match(workflow, /softprops\/action-gh-release@v2/)
+  assert.match(workflow, /SHA256SUMS/)
+  assert.match(workflow, /gh release create/)
+  assert.match(workflow, /gh release upload/)
+  assert.match(workflow, /--generate-notes/)
+  assert.match(workflow, /--clobber/)
   assert.match(workflow, /if: startsWith\(github\.ref, 'refs\/tags\/'\)/)
 })
 
-test('README 与忽略规则包含桌面安装、自动构建和构建产物说明', () => {
+test('GitHub Actions 在 Apple 凭据齐全时签名公证，缺失时明确降级为未签名包', () => {
+  const workflow = readRepoText('.github/workflows/build-desktop.yml')
+  for (const secret of [
+    'APPLE_CERTIFICATE',
+    'APPLE_CERTIFICATE_PASSWORD',
+    'APPLE_API_KEY_P8',
+    'APPLE_API_KEY_ID',
+    'APPLE_API_ISSUER',
+  ]) {
+    assert.ok(workflow.includes(`secrets.${secret}`), `应读取 ${secret}`)
+  }
+  assert.match(workflow, /APPLE_SIGNING_IDENTITY/)
+  assert.match(workflow, /APPLE_API_KEY_PATH/)
+  assert.match(workflow, /APPLE_API_KEY\b/)
+  assert.match(workflow, /APPLE_API_ISSUER/)
+  assert.match(workflow, /macos_signing\.outputs\.enabled == 'true'/)
+  assert.match(workflow, /macos_signing\.outputs\.enabled == 'false'/)
+  assert.match(workflow, /CSC_IDENTITY_AUTO_DISCOVERY: 'false'/)
+  assert.match(workflow, /codesign --verify --deep --strict/)
+  assert.match(workflow, /xcrun stapler validate/)
+  assert.match(workflow, /spctl --assess --type execute/)
+  assert.match(workflow, /Developer ID Application/)
+  assert.match(workflow, /未签名/)
+})
+
+test('构建产物按架构命名并带校验和，避免多架构产物互相覆盖', () => {
+  const workflow = readRepoText('.github/workflows/build-desktop.yml')
+  for (const name of [
+    'CommonTools-macos-${{ matrix.arch }}.dmg',
+    'CommonTools.app-macos-${{ matrix.arch }}.zip',
+    'CommonTools-windows-${{ matrix.arch }}-setup.exe',
+  ]) {
+    assert.ok(workflow.includes(name), `产物收集应生成 ${name}`)
+  }
+  for (const arch of ['x64', 'arm64']) {
+    assert.ok(workflow.includes(`arch: ${arch}`), `应声明 ${arch} 架构矩阵`)
+  }
+  assert.match(workflow, /CommonTools_.*\.AppImage|basename "\$appimage_path"/)
+  assert.match(workflow, /sha256sum/)
+  assert.match(workflow, /SHA256SUMS/)
+  assert.match(workflow, /if-no-files-found: error/)
+})
+
+test('README 与忽略规则包含双架构安装、签名模式和构建产物说明', () => {
   const readme = readRepoText('README.md')
   for (const phrase of [
     '桌面安装包',
@@ -149,9 +257,14 @@ test('README 与忽略规则包含桌面安装、自动构建和构建产物说�
     'GitHub Actions',
     'GitHub Releases',
     'desktop:dev',
-    'desktop:build:mac',
+    'desktop:build:mac:x64',
+    'desktop:build:mac:arm64',
+    'desktop:build:windows:x64',
+    'desktop:build:windows:arm64',
     'desktop:build:linux',
-    'desktop:build:windows',
+    'Apple',
+    '公证',
+    'SHA256SUMS',
     '未签名',
   ]) {
     assert.ok(readme.includes(phrase), `README 应包含 ${phrase}`)

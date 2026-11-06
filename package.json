@@ -11,9 +11,13 @@
     "test": "node --test tests/*.test.mjs",
     "tauri": "tauri",
     "desktop:dev": "tauri dev",
-    "desktop:build:mac": "tauri build --bundles app,dmg",
     "desktop:build:linux": "tauri build --bundles appimage,deb",
-    "desktop:build:windows": "tauri build --bundles nsis"
+    "desktop:build:mac:arm64": "tauri build --target aarch64-apple-darwin --bundles app,dmg",
+    "desktop:build:mac:x64": "tauri build --target x86_64-apple-darwin --bundles app,dmg",
+    "desktop:build:windows:x64": "tauri build --target x86_64-pc-windows-msvc --bundles nsis",
+    "desktop:build:windows:arm64": "tauri build --target aarch64-pc-windows-msvc --bundles nsis",
+    "desktop:build:mac:arm64:unsigned": "tauri build --target aarch64-apple-darwin --bundles app,dmg --config src-tauri/tauri.unsigned.conf.json",
+    "desktop:build:mac:x64:unsigned": "tauri build --target x86_64-apple-darwin --bundles app,dmg --config src-tauri/tauri.unsigned.conf.json"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",

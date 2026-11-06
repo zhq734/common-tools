@@ -23,7 +23,7 @@ npm run build
 
 ## 桌面安装包
 
-应用使用 Tauri v2 打包为原生桌面应用，无需额外后端。窗口可自由调整大小，并继续支持明暗主题与页面状态缓存。
+应用使用 Tauri v2 打包为原生桌面应用，无需额外后端。窗口可自由调整大小，并继续支持明暗主题与页面状态缓存。macOS 与 Windows 分别提供 x64、arm64 双架构安装包，Linux 提供 x64 安装包。
 
 ### 本地开发与构建
 
@@ -37,41 +37,63 @@ npm run desktop:dev
 各平台构建命令：
 
 ```bash
-# macOS：生成 .app 与 .dmg
-npm run desktop:build:mac
+# macOS Apple Silicon（arm64）：生成 .app 与 .dmg
+npm run desktop:build:mac:arm64
 
-# Linux：生成 .AppImage 与 .deb
+# macOS Intel（x64）：生成 .app 与 .dmg
+npm run desktop:build:mac:x64
+
+# Windows x64：生成 NSIS .exe 安装程序
+npm run desktop:build:windows:x64
+
+# Windows arm64：生成 NSIS .exe 安装程序
+npm run desktop:build:windows:arm64
+
+# Linux x64：生成 .AppImage 与 .deb
 npm run desktop:build:linux
-
-# Windows：生成 NSIS .exe 安装程序
-npm run desktop:build:windows
 ```
 
-构建产物默认位于 `src-tauri/target/release/bundle/`。Linux 打包 AppImage 需要 `patchelf`、WebKitGTK 4.1 与 AppIndicator 等系统库；Windows 打包 NSIS 安装包由 Tauri 自动下载构建工具。
+本地双架构构建需先执行 `rustup target add` 安装对应的 Rust target，GitHub Actions 会自动完成这一步。构建产物位于 `src-tauri/target/<target-triple>/release/bundle/`，未指定 target 的 Linux 构建位于 `src-tauri/target/release/bundle/`。Linux 打包 AppImage 需要 `patchelf`、WebKitGTK 4.1 与 AppIndicator 等系统库；Windows arm64 构建需要 Visual Studio 的「MSVC ARM64 生成工具」，GitHub Actions 的 `windows-2025` runner 已预装。Windows NSIS 安装向导支持选择安装目录、开始菜单与桌面快捷方式，并可在安装完成后直接启动应用；安装钩子会用独立 ICO 文件重建快捷方式图标，避免图标缓存显示默认图标。
+
+### 版本号
+
+`src-tauri/tauri.conf.json` 的 `version` 指向 `package.json`，版本号统一由 `package.json` 管理。推送 `v*` 标签或手动运行时传入版本号，GitHub Actions 会执行 `npm version` 同步 `package.json` 与 `package-lock.json`，确保安装包文件名、应用元数据与 Release 标签一致。
+
+### macOS 签名与公证
+
+对齐常见 electron-builder 发布流程，GitHub Actions 会根据仓库 Secrets 自动切换两种模式：
+
+- **凭据齐全**：配置 `APPLE_CERTIFICATE`、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_API_KEY_P8`、`APPLE_API_KEY_ID`、`APPLE_API_ISSUER` 五个 Secret 后，使用 Developer ID Application 证书签名，通过 App Store Connect API 提交 Apple 公证并 staple，最后执行 `codesign --verify`、`xcrun stapler validate` 与 `spctl --assess` 验证 Gatekeeper 状态。
+- **全部缺失**：显式关闭证书自动发现并使用 ad-hoc 签名生成未签名安装包，同时在 workflow summary 中标注降级原因；产物仍可发布与手动安装。
+- **只配置部分**：流水线直接失败并列出缺失项，避免误把错误配置当成已签名发布。
+
+未签名包首次打开可能提示「未知开发者」或「应用已损坏」，确认来源可信后可在终端执行 `xattr -dr com.apple.quarantine "/Applications/CommonTools.app"`，或在「系统设置 → 隐私与安全性」中允许。Windows 安装包未做代码签名，可能出现 SmartScreen 提示；这是未签名应用的正常现象。
 
 ### 自动构建与下载
 
-`.github/workflows/build-desktop.yml` 使用 GitHub Actions 在 macOS、Linux、Windows 上并行构建：
+`.github/workflows/build-desktop.yml` 先运行 `npm test` 与 `npm run typecheck`，再在 5 个矩阵任务上并行构建：
 
-- 推送到 `main` 分支或手动运行：三平台安装包上传为工作流 artifacts。
-- 推送 `v*` 标签：三平台安装包同时上传为工作流 artifacts，并自动创建 GitHub Releases 附件。
+| 平台 | Runner | Rust target | 产物 |
+| --- | --- | --- | --- |
+| macOS x64 | `macos-15-intel` | `x86_64-apple-darwin` | `CommonTools-macos-x64.dmg`、`CommonTools.app-macos-x64.zip` |
+| macOS arm64 | `macos-15` | `aarch64-apple-darwin` | `CommonTools-macos-arm64.dmg`、`CommonTools.app-macos-arm64.zip` |
+| Linux x64 | `ubuntu-22.04` | 本机 target | `.AppImage`、`.deb` |
+| Windows x64 | `windows-2025` | `x86_64-pc-windows-msvc` | `CommonTools-windows-x64-setup.exe` |
+| Windows arm64 | `windows-2025` | `aarch64-pc-windows-msvc` | `CommonTools-windows-arm64-setup.exe` |
 
-在线版仍发布在 GitHub Pages；桌面安装包请到仓库的 GitHub Releases 页面下载：
+- 推送到 `main` 分支或手动运行：各架构安装包上传为独立工作流 artifacts。
+- 推送 `v*` 标签：全部安装包自动创建或更新 GitHub Release，并附带 `SHA256SUMS` 校验和文件。
 
-- **macOS**：`.dmg` 安装镜像与 `.app.zip` 应用压缩包
-- **Linux**：`.AppImage` 便携版与 `.deb` Debian/Ubuntu 安装包
-- **Windows**：NSIS `.exe` 安装程序
-
-当前自动构建未配置 Apple 公证或 Windows 代码签名，因此 macOS 可能提示“未知开发者”，Windows 可能出现 SmartScreen 提示；这是未签名应用的正常现象。
+在线版仍发布在 GitHub Pages；桌面安装包请到仓库的 GitHub Releases 页面下载，下载后可用 `sha256sum -c SHA256SUMS` 校验完整性。
 
 ## 部署
 
 推送到 `main` 分支后：
 
 - `.github/workflows/deploy-pages.yml` 自动构建并发布到 GitHub Pages；
-- `.github/workflows/build-desktop.yml` 自动构建三平台桌面安装包并上传 artifacts。
+- `.github/workflows/build-desktop.yml` 自动构建 macOS / Windows 双架构与 Linux 安装包并上传 artifacts。
 
-推送 `v*` 标签还会创建包含桌面安装包的 GitHub Release。
+推送 `v*` 标签还会创建包含全部架构安装包与 `SHA256SUMS` 的 GitHub Release。
 
 ## 说明
 

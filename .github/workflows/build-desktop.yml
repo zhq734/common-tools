@@ -6,6 +6,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: 可选版本号，例如 v1.0.1；留空时使用 package.json 中的版本
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -15,27 +20,78 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  verify:
+    name: 测试与类型检查
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 运行单元测试
+        run: npm test
+
+      - name: 运行类型检查
+        run: npm run typecheck
+
   build:
+    name: 构建 ${{ matrix.name }}
+    needs: verify
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest
-            build_command: npm run desktop:build:mac
-            artifact_name: desktop-macos
-          - platform: ubuntu-22.04
-            build_command: npm run desktop:build:linux
-            artifact_name: desktop-linux
-          - platform: windows-latest
-            build_command: npm run desktop:build:windows
-            artifact_name: desktop-windows
-    runs-on: ${{ matrix.platform }}
+          - name: macOS x64
+            platform: macos
+            arch: x64
+            os: macos-15-intel
+            rust_target: x86_64-apple-darwin
+            build_command: desktop:build:mac:x64
+            unsigned_command: desktop:build:mac:x64:unsigned
+            artifact_name: desktop-macos-x64
+          - name: macOS arm64
+            platform: macos
+            arch: arm64
+            os: macos-15
+            rust_target: aarch64-apple-darwin
+            build_command: desktop:build:mac:arm64
+            unsigned_command: desktop:build:mac:arm64:unsigned
+            artifact_name: desktop-macos-arm64
+          - name: Linux x64
+            platform: linux
+            arch: x64
+            os: ubuntu-22.04
+            build_command: desktop:build:linux
+            artifact_name: desktop-linux-x64
+          - name: Windows x64
+            platform: windows
+            arch: x64
+            os: windows-2025
+            rust_target: x86_64-pc-windows-msvc
+            build_command: desktop:build:windows:x64
+            artifact_name: desktop-windows-x64
+          - name: Windows arm64
+            platform: windows
+            arch: arm64
+            os: windows-2025
+            rust_target: aarch64-pc-windows-msvc
+            build_command: desktop:build:windows:arm64
+            artifact_name: desktop-windows-arm64
+    runs-on: ${{ matrix.os }}
     steps:
-      - name: Checkout
+      - name: 检出代码
         uses: actions/checkout@v4
 
       - name: 安装 Linux 系统依赖
-        if: runner.os == 'Linux'
+        if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -51,89 +107,249 @@ jobs:
             libxdo-dev \
             libssl-dev
 
-      - name: Setup Node
+      - name: 配置 Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
 
-      - name: Setup Rust
+      - name: 配置 Rust（含交叉编译目标）
+        if: matrix.rust_target != ''
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: 配置 Rust（本机目标）
+        if: matrix.rust_target == ''
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Rust cache
+      - name: 安装交叉编译目标
+        if: matrix.rust_target != ''
+        shell: bash
+        run: rustup target add --toolchain stable ${{ matrix.rust_target }}
+
+      - name: Rust 缓存
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ./src-tauri -> target
 
-      - name: Install frontend dependencies
+      - name: 安装依赖
         run: npm ci
 
-      - name: 运行前端测试
-        run: npm test
+      - name: 同步发布版本
+        if: startsWith(github.ref, 'refs/tags/') || inputs.version != ''
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION="$REQUESTED_VERSION"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION="$GITHUB_REF_NAME"
+          fi
+          VERSION="${VERSION#v}"
+          VERSION="${VERSION#V}"
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
 
-      - name: 构建桌面安装包
-        run: ${{ matrix.build_command }}
+      - name: 检查并准备 macOS 签名与公证凭据
+        if: matrix.platform == 'macos'
+        id: macos_signing
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for variable in \
+            APPLE_CERTIFICATE \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_API_KEY_P8 \
+            APPLE_API_KEY_ID \
+            APPLE_API_ISSUER; do
+            if [[ -z "${!variable:-}" ]]; then
+              missing+=("$variable")
+            fi
+          done
+
+          if (( ${#missing[@]} == 0 )); then
+            printf '%s\n' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+            chmod 600 "$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo 'Apple 发布凭据完整，将执行 Developer ID 签名、Apple 公证和 Gatekeeper 验证。'
+          elif (( ${#missing[@]} == 5 )); then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo '未配置 Apple 发布凭据，将继续生成未签名（ad-hoc）安装包。'
+            {
+              echo '### ⚠️ macOS 未签名安装包'
+              echo
+              echo '本次运行未配置 Apple 发布凭据，macOS 产物仍可手动安装，首次打开前需按 README 处理 Gatekeeper 隔离属性。'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf 'Apple 发布凭据配置不完整，缺少: %s\n' "${missing[*]}" >&2
+            echo '请补齐全部五个 Secret，或删除已配置的部分 Secret 以生成未签名安装包。' >&2
+            exit 1
+          fi
+
+      - name: 构建已签名 macOS 安装包
+        if: matrix.platform == 'macos' && steps.macos_signing.outputs.enabled == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: 'Developer ID Application'
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
+        run: npm run ${{ matrix.build_command }}
+
+      - name: 构建未签名 macOS 安装包
+        if: matrix.platform == 'macos' && steps.macos_signing.outputs.enabled == 'false'
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          APPLE_SIGNING_IDENTITY: '-'
+        run: npm run ${{ matrix.unsigned_command }}
+
+      - name: 构建非 macOS 安装包
+        if: matrix.platform != 'macos'
+        run: npm run ${{ matrix.build_command }}
+
+      - name: 验证 macOS 签名、公证与 Gatekeeper 状态
+        if: matrix.platform == 'macos' && steps.macos_signing.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          apps=("src-tauri/target/${{ matrix.rust_target }}/release/bundle/macos/"*.app)
+          if (( ${#apps[@]} == 0 )); then
+            echo '未找到待验证的 macOS 应用包' >&2
+            exit 1
+          fi
+          for app in "${apps[@]}"; do
+            codesign --verify --deep --strict --verbose=2 "$app"
+            signature_details="$(codesign -dv --verbose=4 "$app" 2>&1)"
+            if ! grep -q '^Authority=Developer ID Application:' <<< "$signature_details"; then
+              echo "macOS 应用未使用 Developer ID Application 签名: $app" >&2
+              printf '%s\n' "$signature_details" >&2
+              exit 1
+            fi
+            xcrun stapler validate "$app"
+            spctl --assess --type execute --verbose=4 "$app"
+          done
+          dmgs=("src-tauri/target/${{ matrix.rust_target }}/release/bundle/dmg/"*.dmg)
+          if (( ${#dmgs[@]} == 0 )); then
+            echo '未找到待验证的 macOS DMG' >&2
+            exit 1
+          fi
+          for dmg in "${dmgs[@]}"; do
+            codesign --verify --verbose=2 "$dmg"
+            xcrun stapler staple "$dmg"
+            xcrun stapler validate "$dmg"
+          done
 
       - name: 收集 macOS 安装包
-        if: runner.os == 'macOS'
+        if: matrix.platform == 'macos'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist-desktop
-          test -d src-tauri/target/release/bundle/dmg
-          test -d src-tauri/target/release/bundle/macos
-          find src-tauri/target/release/bundle/dmg -name '*.dmg' -type f -exec cp {} dist-desktop/ \;
-          app_path=$(find src-tauri/target/release/bundle/macos -name '*.app' -maxdepth 1 -type d -print -quit)
+          bundle="src-tauri/target/${{ matrix.rust_target }}/release/bundle"
+          test -d "$bundle/dmg"
+          test -d "$bundle/macos"
+          dmg_path=$(find "$bundle/dmg" -name '*.dmg' -type f -print -quit)
+          app_path=$(find "$bundle/macos" -name '*.app' -maxdepth 1 -type d -print -quit)
+          test -n "$dmg_path"
           test -n "$app_path"
-          ditto -c -k --sequesterRsrc --keepParent "$app_path" dist-desktop/CommonTools.app.zip
-          test -s dist-desktop/CommonTools.app.zip
+          cp "$dmg_path" "dist-desktop/CommonTools-macos-${{ matrix.arch }}.dmg"
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" "dist-desktop/CommonTools.app-macos-${{ matrix.arch }}.zip"
+          test -s "dist-desktop/CommonTools-macos-${{ matrix.arch }}.dmg"
+          test -s "dist-desktop/CommonTools.app-macos-${{ matrix.arch }}.zip"
 
       - name: 收集 Linux 安装包
-        if: runner.os == 'Linux'
+        if: matrix.platform == 'linux'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist-desktop
-          test -d src-tauri/target/release/bundle/appimage
-          test -d src-tauri/target/release/bundle/deb
-          find src-tauri/target/release/bundle/appimage -name '*.AppImage' -type f -exec cp {} dist-desktop/ \;
-          find src-tauri/target/release/bundle/deb -name '*.deb' -type f -exec cp {} dist-desktop/ \;
-          test -n "$(find dist-desktop -name '*.AppImage' -type f -print -quit)"
-          test -n "$(find dist-desktop -name '*.deb' -type f -print -quit)"
+          bundle=src-tauri/target/release/bundle
+          test -d "$bundle/appimage"
+          test -d "$bundle/deb"
+          appimage_path=$(find "$bundle/appimage" -name '*.AppImage' -type f -print -quit)
+          deb_path=$(find "$bundle/deb" -name '*.deb' -type f -print -quit)
+          test -n "$appimage_path"
+          test -n "$deb_path"
+          cp "$appimage_path" "dist-desktop/$(basename "$appimage_path")"
+          cp "$deb_path" "dist-desktop/$(basename "$deb_path")"
           chmod +x dist-desktop/*.AppImage
+          test -s dist-desktop/*.AppImage
+          test -s dist-desktop/*.deb
 
       - name: 收集 Windows 安装包
-        if: runner.os == 'Windows'
+        if: matrix.platform == 'windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist-desktop | Out-Null
-          $installers = @(Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter *.exe -File)
+          $bundle = "src-tauri/target/${{ matrix.rust_target }}/release/bundle/nsis"
+          $installers = @(Get-ChildItem -Path $bundle -Filter *.exe -File)
           if ($installers.Count -eq 0) { throw '未找到 NSIS 安装包' }
-          $installers | Copy-Item -Destination dist-desktop
+          Copy-Item -Path $installers[0].FullName -Destination "dist-desktop/CommonTools-windows-${{ matrix.arch }}-setup.exe"
+          if (-not (Test-Path "dist-desktop/CommonTools-windows-${{ matrix.arch }}-setup.exe")) { throw '安装包复制失败' }
 
-      - name: Upload desktop artifacts
+      - name: 上传安装包
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
           path: dist-desktop/*
           if-no-files-found: error
+          compression-level: 0
 
   release:
+    name: 发布 GitHub Release
     if: startsWith(github.ref, 'refs/tags/')
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
-      - name: Download desktop artifacts
+      - name: 下载全部安装包
         uses: actions/download-artifact@v4
         with:
           pattern: desktop-*
-          path: artifacts
+          path: release-assets
           merge-multiple: true
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/**/*
-          generate_release_notes: true
+      - name: 生成 SHA-256 校验和
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          shopt -s nullglob
+          files=(*.dmg *.zip *.AppImage *.deb *.exe)
+          if (( ${#files[@]} == 0 )); then
+            echo '未找到可发布的安装包' >&2
+            exit 1
+          fi
+          sha256sum "${files[@]}" > SHA256SUMS
+          test -s SHA256SUMS
+
+      - name: 创建或更新 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          NEW_RELEASE=false
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" \
+              --verify-tag \
+              --draft \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes
+            NEW_RELEASE=true
+          fi
+          gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber
+          if [[ "$NEW_RELEASE" == "true" ]]; then
+            gh release edit "$GITHUB_REF_NAME" --draft=false
+          fi
