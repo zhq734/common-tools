@@ -313,6 +313,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: 下载全部安装包
         uses: actions/download-artifact@v4
         with:
@@ -337,6 +342,7 @@ jobs:
       - name: 创建或更新 GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail

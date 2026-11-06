@@ -249,6 +249,22 @@ test('构建产物按架构命名并带校验和，避免多架构产物互相�
   assert.match(workflow, /if-no-files-found: error/)
 })
 
+test('GitHub Release 任务显式检出仓库并指定目标仓库，避免 gh 依赖缺失的 git 上下文', () => {
+  const workflow = readRepoText('.github/workflows/build-desktop.yml')
+  const releaseJob = workflow.slice(workflow.indexOf('  release:'))
+  assert.match(releaseJob, /actions\/checkout@v4/, 'Release 任务应检出仓库')
+  assert.match(releaseJob, /fetch-depth: 0/, 'Release 任务应获取完整标签信息')
+  assert.match(
+    releaseJob,
+    /GH_REPO: \$\{\{ github\.repository \}\}/,
+    'Release 任务应显式指定目标仓库',
+  )
+  assert.ok(
+    releaseJob.indexOf('actions/checkout@v4') < releaseJob.indexOf('下载全部安装包'),
+    '检出仓库应在下载产物之前执行',
+  )
+})
+
 test('README 与忽略规则包含双架构安装、签名模式和构建产物说明', () => {
   const readme = readRepoText('README.md')
   for (const phrase of [
